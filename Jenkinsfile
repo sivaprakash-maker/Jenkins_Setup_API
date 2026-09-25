@@ -1,9 +1,11 @@
 
 pipeline {
+
     agent any
 
     environment {
         VENV_DIR = 'venv'
+        API_PORT = '5000'
     }
 
     options {
@@ -28,30 +30,80 @@ pipeline {
                     python --version
                     where python
 
+                    echo.
+                    echo Removing old virtual environment...
+
                     if exist "%VENV_DIR%" (
-                        echo Removing old virtual environment...
                         rmdir /s /q "%VENV_DIR%"
                     )
 
+                    echo.
                     echo Creating virtual environment...
+
                     python -m venv "%VENV_DIR%"
 
+                    if errorlevel 1 (
+                        echo Failed to create virtual environment.
+                        exit /b 1
+                    )
+
+                    echo.
                     echo Checking virtual environment Python...
+
                     "%VENV_DIR%\\Scripts\\python.exe" --version
 
+                    echo.
                     echo Upgrading pip...
+
                     "%VENV_DIR%\\Scripts\\python.exe" -m pip install --upgrade pip
 
+                    if errorlevel 1 (
+                        echo Pip upgrade failed.
+                        exit /b 1
+                    )
+
+                    echo.
                     echo Installing requirements...
+
                     "%VENV_DIR%\\Scripts\\python.exe" -m pip install -r requirements.txt
 
+                    if errorlevel 1 (
+                        echo Requirements installation failed.
+                        exit /b 1
+                    )
+
+                    echo.
                     echo Testing NumPy...
+
                     "%VENV_DIR%\\Scripts\\python.exe" -c "import numpy; print('NumPy version:', numpy.__version__); print('NumPy location:', numpy.__file__)"
 
+                    if errorlevel 1 (
+                        echo NumPy test failed.
+                        exit /b 1
+                    )
+
+                    echo.
                     echo Testing Pandas...
+
                     "%VENV_DIR%\\Scripts\\python.exe" -c "import pandas; print('Pandas version:', pandas.__version__); print('Pandas location:', pandas.__file__)"
 
-                    echo Python environment setup completed.
+                    if errorlevel 1 (
+                        echo Pandas test failed.
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo Testing Requests...
+
+                    "%VENV_DIR%\\Scripts\\python.exe" -c "import requests; print('Requests version:', requests.__version__); print('Requests location:', requests.__file__)"
+
+                    if errorlevel 1 (
+                        echo Requests test failed.
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo Python environment setup completed successfully.
                 '''
             }
         }
@@ -66,48 +118,75 @@ pipeline {
                     "%VENV_DIR%\\Scripts\\python.exe" train_model.py
 
                     if errorlevel 1 (
+                        echo.
                         echo Model training failed.
                         exit /b 1
                     )
 
+                    echo.
                     echo Model training completed successfully.
+
+                    if not exist house_model.pkl (
+                        echo ERROR: house_model.pkl was not created.
+                        exit /b 1
+                    )
+
+                    echo Model file found successfully.
                 '''
             }
         }
 
-        stage('Start API & Smoke Test') {
+        stage('Start API') {
             steps {
                 bat '''
                     echo ========================================
-                    echo Starting API
+                    echo Starting Flask API
                     echo ========================================
 
-                    if exist app.log del /f /q app.log
+                    if exist app.log (
+                        del /f /q app.log
+                    )
+
+                    echo Starting API on port %API_PORT%...
 
                     start "FlaskAPI" /B cmd /c ""%VENV_DIR%\\Scripts\\python.exe" app.py > app.log 2>&1"
 
-                    echo Waiting for API...
+                    echo API process started.
+                '''
+            }
+        }
 
-                    set READY=0
+        stage('API Health Check') {
+            steps {
+                bat '''
+                    echo ========================================
+                    echo API Health Check
+                    echo ========================================
 
-                    for /L %%i in (1,1,30) do (
+                    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=1;$i -le 30;$i++){ try { $r=Invoke-WebRequest -Uri 'http://127.0.0.1:5000/' -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200 -and $r.StatusCode -lt 500){ $ok=$true; Write-Host 'API is ready.'; break } } catch { }; Write-Host ('Waiting for API... {0}/30' -f $i); Start-Sleep -Seconds 1 }; if(-not $ok){ Write-Host 'API failed to start.'; Write-Host '===== app.log ====='; if(Test-Path 'app.log'){Get-Content 'app.log'}; Write-Host '==================='; exit 1 }"
 
-                        powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r = Invoke-WebRequest -Uri 'http://127.0.0.1:5000/' -UseBasicParsing -TimeoutSec 2; if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) { exit 0 } else { exit 1 } } catch { exit 1 }"
-
-                        if not errorlevel 1 (
-                            set READY=1
-                            echo API is ready.
-                            goto API_READY
-                        )
-
-                        echo Waiting... %%i/30
-                        timeout /t 1 /nobreak >nul
+                    if errorlevel 1 (
+                        echo API health check failed.
+                        exit /b 1
                     )
 
-                    :API_READY
+                    echo API health check passed.
+                '''
+            }
+        }
 
-                    if "%READY%"=="0" (
-                        echo API failed to start.
+        stage('Prediction Smoke Test') {
+            steps {
+                bat '''
+                    echo ========================================
+                    echo Prediction Smoke Test
+                    echo ========================================
+
+                    "%VENV_DIR%\\Scripts\\python.exe" test_prediction.py
+
+                    if errorlevel 1 (
+                        echo.
+                        echo Prediction test failed.
                         echo.
                         echo ===== app.log =====
 
@@ -119,16 +198,8 @@ pipeline {
                         exit /b 1
                     )
 
-                    echo Running prediction test...
-
-                    "%VENV_DIR%\\Scripts\\python.exe" test_prediction.py
-
-                    if errorlevel 1 (
-                        echo Prediction test failed.
-                        exit /b 1
-                    )
-
-                    echo Smoke test completed successfully.
+                    echo.
+                    echo Prediction smoke test completed successfully.
                 '''
             }
         }
@@ -137,37 +208,51 @@ pipeline {
     post {
 
         always {
+
+            echo 'Cleaning up Flask API...'
+
             bat '''
                 echo ========================================
-                echo Cleaning API process
+                echo Cleaning API Process
                 echo ========================================
 
-                powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*app.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+                powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like '*app.py*' } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }; exit 0"
 
                 echo API cleanup completed.
             '''
 
-            archiveArtifacts artifacts: 'house_model.pkl, app.log',
-                             allowEmptyArchive: true
+            archiveArtifacts(
+                artifacts: 'house_model.pkl,app.log',
+                allowEmptyArchive: true
+            )
         }
 
         success {
-            echo 'Build, train, and smoke test succeeded.'
+            echo '========================================'
+            echo 'BUILD SUCCESS'
+            echo 'Model training and API smoke test passed.'
+            echo '========================================'
         }
 
         failure {
-            echo 'Pipeline failed. Check the console output and app.log.'
+            echo '========================================'
+            echo 'BUILD FAILED'
+            echo 'Check the console output and app.log.'
+            echo '========================================'
         }
 
         cleanup {
+
             bat '''
-                echo Removing virtual environment...
+                echo ========================================
+                echo Removing Virtual Environment
+                echo ========================================
 
                 if exist "%VENV_DIR%" (
                     rmdir /s /q "%VENV_DIR%"
                 )
 
-                echo Cleanup completed.
+                echo Virtual environment cleanup completed.
             '''
         }
     }
