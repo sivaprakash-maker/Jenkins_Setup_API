@@ -136,114 +136,110 @@ pipeline {
             }
         }
 
-       
-stage('Start API') {
-    steps {
-        bat '''
-            echo ========================================
-            echo Starting Flask API
-            echo ========================================
+        stage('Start API') {
+            steps {
+                bat '''
+                    echo ========================================
+                    echo Starting Flask API
+                    echo ========================================
 
-            if exist app.log del /f /q app.log
-            if exist flask.pid del /f /q flask.pid
+                    if exist app.log (
+                        del /f /q app.log
+                    )
 
-            echo Starting API on port %API_PORT%...
+                    echo Starting API on port %API_PORT%...
 
-            powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-              "$p = Start-Process -FilePath 'venv\\Scripts\\python.exe' -ArgumentList 'app.py' -RedirectStandardOutput 'app.log' -RedirectStandardError 'app.log' -PassThru; Set-Content -Path 'flask.pid' -Value $p.Id"
+                    start "FlaskAPI" /B cmd /c ""%VENV_DIR%\\Scripts\\python.exe" app.py > app.log 2>&1"
 
-            echo API process started.
-        '''
+                    echo API process started.
+                '''
+            }
+        }
+
+        stage('API Health Check') {
+            steps {
+                bat '''
+                    echo ========================================
+                    echo API Health Check
+                    echo ========================================
+
+                    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=1;$i -le 30;$i++){ try { $r=Invoke-WebRequest -Uri 'http://127.0.0.1:5000/' -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200 -and $r.StatusCode -lt 500){ $ok=$true; Write-Host 'API is ready.'; break } } catch { }; Write-Host ('Waiting for API... {0}/30' -f $i); Start-Sleep -Seconds 1 }; if(-not $ok){ Write-Host 'API failed to start.'; Write-Host '===== app.log ====='; if(Test-Path 'app.log'){Get-Content 'app.log'}; Write-Host '==================='; exit 1 }"
+
+                    if errorlevel 1 (
+                        echo API health check failed.
+                        exit /b 1
+                    )
+
+                    echo API health check passed.
+                '''
+            }
+        }
+
+        stage('Prediction Smoke Test') {
+            steps {
+                bat '''
+                    echo ========================================
+                    echo Prediction Smoke Test
+                    echo ========================================
+
+                    "%VENV_DIR%\\Scripts\\python.exe" test_prediction.py
+
+                    if errorlevel 1 (
+                        echo.
+                        echo Prediction test failed.
+                        echo.
+                        echo ===== app.log =====
+
+                        if exist app.log (
+                            type app.log
+                        )
+
+                        echo ===================
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo Prediction smoke test completed successfully.
+                '''
+            }
+        }
     }
-}
 
-stage('API Health Check') {
-    steps {
-        bat '''
-            echo ========================================
-            echo API Health Check
-            echo ========================================
+    post {
 
-            powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=1;$i -le 30;$i++){ try { $r=Invoke-WebRequest -Uri 'http://127.0.0.1:5000/' -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200 -and $r.StatusCode -lt 500){ $ok=$true; Write-Host 'API is ready.'; break } } catch { }; Write-Host ('Waiting for API... {0}/30' -f $i); Start-Sleep -Seconds 1 }; if(-not $ok){ Write-Host 'API failed to start.'; Write-Host '===== app.log ====='; if(Test-Path 'app.log'){Get-Content 'app.log'}; Write-Host '==================='; exit 1 }"
+        always {
 
-            if errorlevel 1 (
-                echo API health check failed.
-                exit /b 1
+            echo 'Cleaning up Flask API...'
+
+            bat '''
+                echo ========================================
+                echo Cleaning API Process
+                echo ========================================
+
+                powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like '*app.py*' } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }; exit 0"
+
+                echo API cleanup completed.
+            '''
+
+            archiveArtifacts(
+                artifacts: 'house_model.pkl,app.log',
+                allowEmptyArchive: true
             )
+        }
 
-            echo API health check passed.
-        '''
-    }
-}
+        success {
+            echo '========================================'
+            echo 'BUILD SUCCESS'
+            echo 'Model training and API smoke test passed.'
+            echo '========================================'
+        }
 
-stage('Prediction Smoke Test') {
-    steps {
-        bat '''
-            echo ========================================
-            echo Prediction Smoke Test
-            echo ========================================
-
-            "venv\\Scripts\\python.exe" test_prediction.py
-
-            if errorlevel 1 (
-                echo Prediction test failed.
-                echo.
-                echo ===== app.log =====
-                if exist app.log type app.log
-                echo ===================
-                exit /b 1
-            )
-
-            echo.
-            echo Prediction smoke test completed successfully.
-        '''
-    }
-}
-
-post {
-    always {
-        echo 'Cleaning up Flask API...'
-
-        bat '''
-            echo ========================================
-            echo Cleaning API Process
-            echo ========================================
-
-            if exist flask.pid (
-                echo Stopping Flask process...
-
-                powershell -NoProfile -ExecutionPolicy Bypass -Command "$pid = Get-Content 'flask.pid' -ErrorAction SilentlyContinue; if($pid){ try { Stop-Process -Id ([int]$pid) -Force -ErrorAction SilentlyContinue; Write-Host 'Flask process stopped.' } catch { Write-Host 'Flask process already stopped.' } }"
-
-                del /f /q flask.pid
-            ) else (
-                echo Flask PID file not found. Nothing to clean.
-            )
-
-            echo API cleanup completed.
-        '''
-
-        archiveArtifacts artifacts: 'house_model.pkl,app.log', allowEmptyArchive: true
-    }
-
-    success {
-        echo '''
-========================================
-BUILD SUCCESSFUL
-========================================
-'''
-    }
-
-    failure {
-        echo '''
-========================================
-BUILD FAILED
-========================================
-Check the console output and app.log.
-========================================
-'''
-    }
-}
-
+        failure {
+            echo '========================================'
+            echo 'BUILD FAILED'
+            echo 'Check the console output and app.log.'
+            echo '========================================'
+        }
 
         cleanup {
 
