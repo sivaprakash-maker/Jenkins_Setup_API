@@ -118,7 +118,6 @@ pipeline {
                     "%VENV_DIR%\\Scripts\\python.exe" train_model.py
 
                     if errorlevel 1 (
-                        echo.
                         echo Model training failed.
                         exit /b 1
                     )
@@ -147,9 +146,22 @@ pipeline {
                         del /f /q app.log
                     )
 
+                    if exist app_error.log (
+                        del /f /q app_error.log
+                    )
+
+                    if exist flask.pid (
+                        del /f /q flask.pid
+                    )
+
                     echo Starting API on port %API_PORT%...
 
-                    start "FlaskAPI" /B cmd /c ""%VENV_DIR%\\Scripts\\python.exe" app.py > app.log 2>&1"
+                    powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Start-Process -FilePath 'venv\\Scripts\\python.exe' -ArgumentList 'app.py' -RedirectStandardOutput 'app.log' -RedirectStandardError 'app_error.log' -PassThru; Set-Content -Path 'flask.pid' -Value $p.Id"
+
+                    if errorlevel 1 (
+                        echo Failed to start Flask API.
+                        exit /b 1
+                    )
 
                     echo API process started.
                 '''
@@ -163,7 +175,7 @@ pipeline {
                     echo API Health Check
                     echo ========================================
 
-                    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=1;$i -le 30;$i++){ try { $r=Invoke-WebRequest -Uri 'http://127.0.0.1:5000/' -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200 -and $r.StatusCode -lt 500){ $ok=$true; Write-Host 'API is ready.'; break } } catch { }; Write-Host ('Waiting for API... {0}/30' -f $i); Start-Sleep -Seconds 1 }; if(-not $ok){ Write-Host 'API failed to start.'; Write-Host '===== app.log ====='; if(Test-Path 'app.log'){Get-Content 'app.log'}; Write-Host '==================='; exit 1 }"
+                    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=1;$i -le 30;$i++){ try { $r=Invoke-WebRequest -Uri 'http://127.0.0.1:5000/' -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200 -and $r.StatusCode -lt 500){ $ok=$true; Write-Host 'API is ready.'; break } } catch { }; Write-Host ('Waiting for API... {0}/30' -f $i); Start-Sleep -Seconds 1 }; if(-not $ok){ Write-Host 'API failed to start.'; Write-Host '===== app.log ====='; if(Test-Path 'app.log'){Get-Content 'app.log'}; Write-Host '===== app_error.log ====='; if(Test-Path 'app_error.log'){Get-Content 'app_error.log'}; Write-Host '==================='; exit 1 }"
 
                     if errorlevel 1 (
                         echo API health check failed.
@@ -194,6 +206,13 @@ pipeline {
                             type app.log
                         )
 
+                        echo.
+                        echo ===== app_error.log =====
+
+                        if exist app_error.log (
+                            type app_error.log
+                        )
+
                         echo ===================
                         exit /b 1
                     )
@@ -216,29 +235,52 @@ pipeline {
                 echo Cleaning API Process
                 echo ========================================
 
-                powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like '*app.py*' } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }; exit 0"
+                if exist flask.pid (
+
+                    echo Flask PID file found.
+
+                    powershell -NoProfile -ExecutionPolicy Bypass -Command "$processId = Get-Content 'flask.pid' -ErrorAction SilentlyContinue; if($processId){ try { Stop-Process -Id ([int]$processId) -Force -ErrorAction SilentlyContinue; Write-Host 'Flask process stopped.' } catch { Write-Host 'Flask process was already stopped.' } }"
+
+                    del /f /q flask.pid
+
+                ) else (
+
+                    echo Flask PID file not found.
+                    echo Nothing to clean.
+
+                )
 
                 echo API cleanup completed.
             '''
 
-            archiveArtifacts(
-                artifacts: 'house_model.pkl,app.log',
-                allowEmptyArchive: true
-            )
+            archiveArtifacts artifacts: 'house_model.pkl,app.log,app_error.log', allowEmptyArchive: true
         }
 
         success {
-            echo '========================================'
-            echo 'BUILD SUCCESS'
-            echo 'Model training and API smoke test passed.'
-            echo '========================================'
+
+            echo '''
+========================================
+BUILD SUCCESSFUL
+========================================
+Python environment created
+Model trained successfully
+Flask API started
+API health check passed
+Prediction test passed
+Cleanup completed
+========================================
+'''
         }
 
         failure {
-            echo '========================================'
-            echo 'BUILD FAILED'
-            echo 'Check the console output and app.log.'
-            echo '========================================'
+
+            echo '''
+========================================
+BUILD FAILED
+========================================
+Check the console output and app.log
+========================================
+'''
         }
 
         cleanup {
